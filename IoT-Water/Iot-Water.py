@@ -285,7 +285,7 @@ def query_data(num):
 def query_period_data(period):
     """
     根据时段查询MySQL数据，使用GET方法获取最近时间段数据，使用POST方法获得历史时间段数据
-    :param period: Hour/Day/Year
+    :param period: Hour/Day/Month
     :return: 符合时间段要求的数据
     """
     if request.method == 'GET':  # GET获取当前时间的区间数据
