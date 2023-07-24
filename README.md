@@ -16,3 +16,8 @@
 * 添加 /ctrl_switch&lt;num>/&lt;state>：控制第num个气泵的状态为state  
 * 添加 /autoCtrl：启动自动控制曝气，原理为查询数据库最新48个COD数据进行预测，根据LSTM预测结果，手动划分共13个挡位（可更改）  
 * 添加 /stopAutoCtrl：停止自动控制曝气  
+
+***2023-07-25***
+* 创建ctrl_system：同步控制系统状态，并设置自动控制
+* 添加 /ctrl_pump&lt;num>/&lt;state>：控制第num个蠕动泵的状态为state
+* 添加 /query_state：查询控制系统状态
