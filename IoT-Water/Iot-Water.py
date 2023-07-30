@@ -1,7 +1,7 @@
 from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import cross_origin
-from datetime import datetime,timedelta
+from datetime import datetime, timedelta
 import time
 from threading import Thread
 import requests
@@ -10,7 +10,8 @@ import random
 from flask import request
 import pandas as pd
 
-app = Flask(__name__, static_url_path='/s', static_folder='static', template_folder='templates')
+app = Flask(__name__, static_url_path='/s',
+            static_folder='static', template_folder='templates')
 
 HOSTNAME = "127.0.0.1"  # MySQL所在主机名
 PORT = 3306  # MySQL监听的端口号，默认3306
@@ -27,7 +28,42 @@ token_jxy = ""  # Token 调用IoTDA
 token_gjq = ""  # Token 调用ModelArts
 token_flag = False  # 已获取Token标识
 getData_flag = False  # 启动数据获取标识
-autoCtrl_flag = False  # 启动自动控制标识
+
+
+class ctrl_system:
+    """
+    用于同步控制系统的状态
+    """
+
+    def __init__(self):
+        self.switch = ['OFF', 'OFF', 'OFF', 'OFF', 'OFF', 'OFF']
+        self.motor = [0, 0, 0, 0, 0, 0]
+        self.pump = ['OFF', 'OFF', 'OFF']
+        self.autoCtrl_flag = False  # 启动自动控制标识
+
+    def ctrl_switch(self, id, state):
+        self.switch[id] = state
+        print(f'Switch{id}: {state}')
+
+    def ctrl_motor(self, id, speed):
+        self.motor[id] = speed
+        print(f'Motor{id}: {speed}')
+
+    def ctrl_pump(self, id, state):
+        self.pump[id] = state
+        print(f'Pump{id}: {state}')
+
+    def start_auto(self):
+        self.autoCtrl_flag = True
+        Async_autoCtrl().auto_ctrl_thread()  # 启动自动控制线程
+        print('Start auto-control.')
+
+    def stop_auto(self):
+        self.autoCtrl_flag = False
+        print('Stop auto-control.')
+
+
+ctrlSystem = ctrl_system()
 
 
 class WaterData(db.Model):
@@ -42,6 +78,7 @@ class WaterData(db.Model):
     DO = db.Column(db.Float)
     PH = db.Column(db.Float)
     TDS = db.Column(db.Float)
+    FTU = db.Column(db.Float)
     COD = db.Column(db.Float)
 
 
@@ -52,7 +89,8 @@ def query2dict(model_list):
     :return:dict
     """
     if isinstance(model_list, list):  # 如果传入的参数是一个list类型的，说明是使用的all()的方式查询的
-        if isinstance(model_list[0], db.Model):  # 这种方式是获得的整个对象，相当于 select * from table
+        # 这种方式是获得的整个对象，相当于 select * from table
+        if isinstance(model_list[0], db.Model):
             lst = []
             for model in model_list:
                 dic = {}
@@ -114,17 +152,18 @@ class Async_getData:
                 try:
                     add = WaterData(datetime=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                                     temperature=res['response']['services'][0]['properties']['temperature'],
-                                    PH=res['response']['services'][0]['properties']['PH'],
-                                    DO=2.5 + 0.2*round(random.random(), 2),
-                                    TDS=0.56 + 0.1*round(random.random(), 2),
+                                    PH=res['response']['services'][0]['properties']['PH']/100,
+                                    DO=res['response']['services'][0]['properties']['ORP']/100,
+                                    TDS=res['response']['services'][0]['properties']['TDS'],
+                                    FTU=res['response']['services'][0]['properties']['turbidity'],
                                     COD=cod_valid[times])
                     db.session.add(add)
                     db.session.commit()
                 except KeyError:  # 如果数据获取有误
-                    # add = WaterData(datetime=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), temperature=100.0,
-                    #                 PH=5.9, DO=2.5, TDS=0.56, COD=cod_valid[times])
-                    # db.session.add(add)
-                    # db.session.commit()
+                    add = WaterData(datetime=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), temperature=100.0,
+                                    PH=5.9, DO=2.5, TDS=0.56, COD=cod_valid[times])
+                    db.session.add(add)
+                    db.session.commit()
                     pass
             time.sleep(1)
             times = times + 1
@@ -146,7 +185,7 @@ class Async_autoCtrl:
 
     @start_async
     def auto_ctrl_thread(*args):
-        while autoCtrl_flag:
+        while ctrlSystem.autoCtrl_flag:
             with app.app_context():
                 res = query2dict(WaterData.query.all())
                 cods = []
@@ -292,11 +331,14 @@ def query_period_data(period):
         time_now = datetime.now()
         # print(time_now.strftime('%Y-%m-%d %H:%M:%S'))
         if period == 'Hour':
-            res = WaterData.query.filter(WaterData.datetime >= time_now - timedelta(hours=1)).all()
+            res = WaterData.query.filter(
+                WaterData.datetime >= time_now - timedelta(hours=1)).all()
         elif period == 'Day':
-            res = WaterData.query.filter(WaterData.datetime >= time_now - timedelta(days=1)).all()
+            res = WaterData.query.filter(
+                WaterData.datetime >= time_now - timedelta(days=1)).all()
         elif period == 'Month':
-            res = WaterData.query.filter(WaterData.datetime >= time_now - timedelta(days=30)).all()
+            res = WaterData.query.filter(
+                WaterData.datetime >= time_now - timedelta(days=30)).all()
         else:
             res = []
     else:  # POST获取历史时间的区间数据
@@ -304,17 +346,23 @@ def query_period_data(period):
         if period == 'Hour':
             time_query = datetime(int(time_form["year"]), int(time_form["month"]), int(time_form["day"]),
                                   int(time_form["hour"]))
-            res = WaterData.query.filter(time_query <= WaterData.datetime).filter(WaterData.datetime < time_query + timedelta(hours=1)).all()
+            res = WaterData.query.filter(time_query <= WaterData.datetime).filter(
+                WaterData.datetime < time_query + timedelta(hours=1)).all()
         elif period == 'Day':
-            time_query = datetime(int(time_form["year"]), int(time_form["month"]), int(time_form["day"]))
-            res = WaterData.query.filter(time_query <= WaterData.datetime).filter(WaterData.datetime < time_query + timedelta(days=1)).all()
+            time_query = datetime(int(time_form["year"]), int(
+                time_form["month"]), int(time_form["day"]))
+            res = WaterData.query.filter(time_query <= WaterData.datetime).filter(
+                WaterData.datetime < time_query + timedelta(days=1)).all()
         elif period == 'Month':
-            time_query = datetime(int(time_form["year"]), int(time_form["month"]), 1)
+            time_query = datetime(
+                int(time_form["year"]), int(time_form["month"]), 1)
             if int(time_form["month"]) < 12:
-                time_query_till = datetime(int(time_form["year"]), int(time_form["month"])+1, 1)
+                time_query_till = datetime(
+                    int(time_form["year"]), int(time_form["month"])+1, 1)
             else:
                 time_query_till = datetime(int(time_form["year"])+1, 1, 1)
-            res = WaterData.query.filter(time_query <= WaterData.datetime).filter(WaterData.datetime < time_query_till).all()
+            res = WaterData.query.filter(time_query <= WaterData.datetime).filter(
+                WaterData.datetime < time_query_till).all()
         else:
             res = []
     if len(res) >= 1:
@@ -368,7 +416,7 @@ def predict_data_svm():
     res = requests.post(url=url, json=Body, verify=False)
     # print(json.loads(res.text)['data']['resp_data'][0]['predictresult'])
     return [json.loads(res.text)['data']['resp_data'][0]['predictresult']]
-    
+
 
 @app.route('/ctrl_motor<num>/<speed>')
 @cross_origin()
@@ -394,6 +442,8 @@ def control_motor(num, speed):
     }
     command = requests.post(url=url, json=Body, headers=Headers)
     res = command.status_code
+    if res == 200:
+        ctrlSystem.ctrl_motor(int(num), int(speed))  # 同步设备状态
     return str(res)
 
 
@@ -419,9 +469,38 @@ def control_switch(num, state):
             f"Switch{num}": f"{state}"
         }
     }
-    print({f"Switch{num}": f"{state}"})
     command = requests.post(url=url, json=Body, headers=Headers)
     res = command.status_code
+    if res == 200:
+        ctrlSystem.ctrl_switch(int(num), state)  # 同步设备状态
+    return str(res)
+
+
+@app.route('/ctrl_pump<num>/<state>')
+@cross_origin()
+def control_pump(num, state):
+    """
+    控制第num个蠕动泵的状态为state
+    :param num: 蠕动泵编号
+    :param state: 控制状态 ON/OFF
+    :return: 响应码（200）
+    """
+    url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot/35bacf8d0d634b3f8a70fc9b5286d79d/devices/63dcdaa2352830580e47364e_2023_3_25/commands"
+    Headers = {
+        "X-Auth-Token": token_jxy,
+        'Content-Type': 'application/json'
+    }
+    Body = {
+        "service_id": "WP_Control_System",
+        "command_name": "WP0_Control",
+        "paras": {
+            f"WP{num}": f"{state}"
+        }
+    }
+    command = requests.post(url=url, json=Body, headers=Headers)
+    res = command.status_code
+    if res == 200:
+        ctrlSystem.ctrl_pump(int(num), state)  # 同步设备状态
     return str(res)
 
 
@@ -432,9 +511,7 @@ def autoCtrl():
     启动多线程自动控制曝气
     :return: Start running automatically
     """
-    global autoCtrl_flag
-    autoCtrl_flag = True
-    Async_autoCtrl().auto_ctrl_thread()  # 启动异步线程
+    ctrlSystem.start_auto()
     return 'Start running automatically.'
 
 
@@ -445,9 +522,18 @@ def stopAutoCtrl():
     停止多线程自动控制曝气
     :return: Stop running automatically
     """
-    global autoCtrl_flag
-    autoCtrl_flag = False
+    ctrlSystem.stop_auto()
     return 'Stop running automatically.'
+
+
+@app.route('/query_state')
+@cross_origin()
+def queryState():
+    """
+    查询控制系统状态
+    :return: 状态dict
+    """
+    return {'switch': ctrlSystem.switch, 'motor': ctrlSystem.motor}
 
 
 if __name__ == '__main__':
