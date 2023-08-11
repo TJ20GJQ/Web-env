@@ -13,6 +13,7 @@ import pandas as pd
 app = Flask(__name__, static_url_path='/s',
             static_folder='static', template_folder='templates')
 
+# 连接数据库
 HOSTNAME = "127.0.0.1"  # MySQL所在主机名
 PORT = 3306  # MySQL监听的端口号，默认3306
 USERNAME = "root"  # 连接MySQL的用户名，自己设置
@@ -24,6 +25,12 @@ app.config[
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = True
 db = SQLAlchemy(app)
 
+# 连接边缘节点
+Edge_URL = "https://192.168.203.131:"
+LSTM_port = '1029'
+SVR_port = '1031'
+
+# 连接华为云
 token_jxy = ""  # Token 调用IoTDA
 token_gjq = ""  # Token 调用ModelArts
 token_flag = False  # 已获取Token标识
@@ -75,11 +82,16 @@ class WaterData(db.Model):
     id = db.Column("id", db.Integer, primary_key=True, autoincrement=True)
     datetime = db.Column(db.DateTime)
     temperature = db.Column(db.Float)
-    DO = db.Column(db.Float)
+    ORP = db.Column(db.Float)
     PH = db.Column(db.Float)
     TDS = db.Column(db.Float)
-    FTU = db.Column(db.Float)
+    TU = db.Column(db.Float)
+    DO = db.Column(db.Float)
     COD = db.Column(db.Float)
+
+
+virtual_DO = 2.5
+valid_data_num = 0  # 存入数据库的有效数据量
 
 
 def query2dict(model_list):
@@ -117,6 +129,7 @@ class Async_getData:
     """
     实现多线程的异步非阻塞向IoTDA的API获取数据，存入数据库，实现数据的实时更新
     """
+
     def start_async(*args):
         fun = args[0]
 
@@ -130,7 +143,7 @@ class Async_getData:
     @start_async
     def get_data_thread(*args):
         cod_valid = pd.read_csv('COD_valid.csv', index_col=False)['fit']
-        times = 0  # 循环次数，用来存储实际污水厂COD数据
+        global valid_data_num  # 循环次数，用来存储实际污水厂COD数据
         with app.app_context():
             db.create_all()  # 在数据库中生成数据表
             db.session.commit()
@@ -152,27 +165,29 @@ class Async_getData:
                 try:
                     add = WaterData(datetime=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                                     temperature=res['response']['services'][0]['properties']['temperature'],
-                                    PH=res['response']['services'][0]['properties']['PH']/100,
-                                    DO=res['response']['services'][0]['properties']['ORP']/100,
+                                    PH=res['response']['services'][0]['properties']['PH'] / 100,
+                                    ORP=res['response']['services'][0]['properties']['ORP'] / 100,
                                     TDS=res['response']['services'][0]['properties']['TDS'],
-                                    FTU=res['response']['services'][0]['properties']['turbidity'],
-                                    COD=cod_valid[times])
+                                    TU=res['response']['services'][0]['properties']['turbidity'],
+                                    DO=virtual_DO,
+                                    COD=cod_valid[valid_data_num])
                     db.session.add(add)
                     db.session.commit()
                 except KeyError:  # 如果数据获取有误
                     add = WaterData(datetime=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), temperature=100.0,
-                                    PH=5.9, DO=2.5, TDS=0.56, COD=cod_valid[times])
+                                    PH=5.9, ORP=2.5, TDS=0.56, TU=2946, DO=virtual_DO, COD=cod_valid[valid_data_num])
                     db.session.add(add)
                     db.session.commit()
                     pass
             time.sleep(1)
-            times = times + 1
+            valid_data_num = valid_data_num + 1
 
 
 class Async_autoCtrl:
     """
     实现多线程的异步非阻塞实时控制（基于对工厂实际COD数据的预测）
     """
+
     def start_async(*args):
         fun = args[0]
 
@@ -185,27 +200,92 @@ class Async_autoCtrl:
 
     @start_async
     def auto_ctrl_thread(*args):
+        cod_valid = pd.read_csv('COD_valid.csv', index_col=False)
         while ctrlSystem.autoCtrl_flag:
             with app.app_context():
-                res = query2dict(WaterData.query.all())
+                data = query2dict(WaterData.query.all())
+                # LSTM
                 cods = []
-                for dic in res[-48:]:
+                for dic in data[-48:]:
                     cods.append(dic['COD'])
-                url = "https://192.168.203.131:1027"
                 Body = {
                     "history": cods
                 }
                 requests.packages.urllib3.disable_warnings()
-                res = requests.post(url=url, json=Body, verify=False)
-                res = json.loads(res.text)[0]['predict']
-                url = "https://192.168.203.131:1028"
+                res = requests.post(url=Edge_URL + LSTM_port, json=Body, verify=False)
+                lstm_res = json.loads(res.text)[0]['predict']
+                # print(lstm_res)
+                # SVR
+                cods = []
+                for dic in data[-3:]:
+                    cods.append(dic['COD'])
                 Body = {
-                    "ctrl_data": res
+                    "history": cods
                 }
-                res = requests.post(url=url, json=Body, verify=False)
-                res = json.loads(res.text)['resp_data']
-                print(res)
-                time.sleep(1)
+                res = requests.post(url=Edge_URL + SVR_port, json=Body, verify=False)
+                svr_res = json.loads(res.text)['data']['resp_data'][0]['predictresult']
+                # print(svr_res)
+                # 专家系统
+                hours_weight = [[0.98252977], [1.], [0.94414396], [0.80917324], [0.36559509], [0.18254638],
+                                [0.05554637], [0.], [0.06089251], [0.14743402], [0.37075089], [0.49937936],
+                                [0.50749575], [0.58988084], [0.63060292], [0.79432664], [0.87635415], [0.81332173],
+                                [0.66796073], [0.62331583], [0.65741986], [0.72028482], [0.71353762], [0.75597631]]
+                weekdays_weight = [[0.83437227], [0.6625369], [0.52733128], [0.6964075], [1.], [0.], [0.11924007]]
+                pred = -0.317249 + 0.005082 * lstm_res + 0.995783 * svr_res + \
+                       0.672760 * hours_weight[cod_valid['hour'][valid_data_num]][0] - 0.265673 * \
+                       weekdays_weight[cod_valid['week'][valid_data_num]][0]
+                print(pred)
+                # 预测残差
+                ctrl = pred - data[-1]['COD']
+
+                ctrl_rule = [-60, -54, -48, -42, -36, -30, -24, -18, -12, -6, 0, 6, 12, 18, 24, 30, 36, 42, 48, 54, 60]
+                ctrl_index = -1
+                for i in range(len(ctrl_rule)):
+                    if ctrl < ctrl_rule[i]:
+                        ctrl_index = i
+                        break
+                if ctrl_index == -1:
+                    ctrl_index = len(ctrl_rule)
+
+                ctrl_commends = ['20230810190159000000FFFFFFFFF111111',
+                                 '20230810190159000000FFFFFFFFF333333',
+                                 '20230810190159000000FFFFFFFFF555555',
+                                 '20230810190159000000FFFFFFFFF777777',
+                                 '20230810190159000000FFFFFFFFF999999',
+                                 '20230810190159000000FFFFFTFFF111111',
+                                 '20230810190159000000FFFFFTFFF333333',
+                                 '20230810190159000000FFFFFTFFF555555',
+                                 '20230810190159000000FFFFFTFFF777777',
+                                 '20230810190159000000FFFFFTFFF999999',
+                                 '20230810190159000000FFFTFTTFT111111',
+                                 '20230810190159000000TTFTFTTTT333333',
+                                 '20230810190159000000TTFTFTTTT555555',
+                                 '20230810190159000000TTFTFTTTT777777',
+                                 '20230810190159000000TTFTFTTTT999999',
+                                 '20230810190159000000TTFTTTTTT111111',
+                                 '20230810190159000000TTFTTTTTT333333',
+                                 '20230810190159000000TTFTTTTTT555555',
+                                 '20230810190159000000TTFTTTTTT777777',
+                                 '20230810190159000000TTFTTTTTT999999',
+                                 '20230810190159000000TTTTTTTTT111111',
+                                 ]
+                cmd = ctrl_commends[ctrl_index]
+                url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot/35bacf8d0d634b3f8a70fc9b5286d79d/devices/63dcdaa2352830580e47364e_2023_3_25/commands"
+                Headers = {
+                    "X-Auth-Token": token_jxy,
+                    'Content-Type': 'application/json'}
+                Body = {
+                    "service_id": "All_Control_System",
+                    "command_name": f"All_Control",
+                    "paras": {
+                        "Control_Flags": cmd
+                    }
+                }
+                command = requests.post(url=url, json=Body, headers=Headers)
+                global virtual_DO
+                virtual_DO = virtual_DO + (ctrl_index-10)*0.01
+                print(ctrl_index)
+                time.sleep(5)
 
 
 @app.route('/')
@@ -358,9 +438,9 @@ def query_period_data(period):
                 int(time_form["year"]), int(time_form["month"]), 1)
             if int(time_form["month"]) < 12:
                 time_query_till = datetime(
-                    int(time_form["year"]), int(time_form["month"])+1, 1)
+                    int(time_form["year"]), int(time_form["month"]) + 1, 1)
             else:
-                time_query_till = datetime(int(time_form["year"])+1, 1, 1)
+                time_query_till = datetime(int(time_form["year"]) + 1, 1, 1)
             res = WaterData.query.filter(time_query <= WaterData.datetime).filter(
                 WaterData.datetime < time_query_till).all()
         else:
@@ -376,46 +456,56 @@ def query_period_data(period):
         return []
 
 
-# 使用LSTM算法预测下一个
 @app.route('/lstm')
 @cross_origin()
 def predict_data_lstm():
-    # url = "https://c8af6bb488604c9896ae462d73d7056d.apigw.cn-north-4.huaweicloud.com/v1/infers/01ee8b10-b5fa-4a7c-
-    # 94bc-4f417b63a76c"
-    # Headers = {
-    #     "X-Auth-Token": token_gjq}
-    url = "https://192.168.203.131:1027"
-    Body = {
-        "history": [428.847, 422.564, 416.514, 410.696, 405.111, 399.758, 394.638, 389.750, 385.095, 380.672, 376.482,
-                    372.524, 368.799, 365.307, 362.046, 359.019, 356.224, 353.661, 351.331, 349.233, 347.368, 345.736,
-                    344.336, 343.168, 341.125, 340.293, 341.150, 342.997, 345.267, 347.698, 348.516, 349.393, 352.321,
-                    355.089, 356.239, 356.967, 357.737, 358.178, 354.248, 351.348, 348.909, 347.552, 353.144, 358.907,
-                    365.038, 370.885, 374.398, 377.583]
-    }
-    # res = requests.post(url=url, headers=Headers, json=Body)
-    requests.packages.urllib3.disable_warnings()
-    res = requests.post(url=url, json=Body, verify=False)
-    # print(json.loads(res.text)[0]['predict'])
-    return [json.loads(res.text)[0]['predict']]
+    """
+    使用LSTM算法预测下一个COD
+    :return: [COD预测值]
+    """
+    with app.app_context():
+        data = query2dict(WaterData.query.all())
+        cods = []
+        for dic in data[-48:]:
+            cods.append(dic['COD'])
+        url = Edge_URL + LSTM_port
+        Body = {
+            # "history": [428.847, 422.564, 416.514, 410.696, 405.111, 399.758, 394.638, 389.750, 385.095, 380.672,
+            #             376.482, 372.524, 368.799, 365.307, 362.046, 359.019, 356.224, 353.661, 351.331, 349.233,
+            #             347.368, 345.736, 344.336, 343.168, 341.125, 340.293, 341.150, 342.997, 345.267, 347.698,
+            #             348.516, 349.393, 352.321, 355.089, 356.239, 356.967, 357.737, 358.178, 354.248, 351.348,
+            #             348.909, 347.552, 353.144, 358.907, 365.038, 370.885, 374.398, 377.583]
+            "history": cods
+        }
+        # res = requests.post(url=url, headers=Headers, json=Body)
+        requests.packages.urllib3.disable_warnings()
+        res = requests.post(url=url, json=Body, verify=False)
+        # print(json.loads(res.text)[0]['predict'])
+        return [json.loads(res.text)[0]['predict']]
 
 
-# 使用SVM算法预测下一个
 @app.route('/svm')
 @cross_origin()
 def predict_data_svm():
-    # url = "https://c8af6bb488604c9896ae462d73d7056d.apigw.cn-north-4.huaweicloud.com/v1/infers/1cbd3692-732f-4d7f-
-    # bcf7-70a0081f4606"
-    # Headers = {
-    #     "X-Auth-Token": token_gjq}
-    url = "https://192.168.203.131:1025"
-    Body = {
-        "history": [5.479, 5.600, 5.715]
-    }
-    # res = requests.post(url=url, headers=Headers, json=Body)
-    requests.packages.urllib3.disable_warnings()
-    res = requests.post(url=url, json=Body, verify=False)
-    # print(json.loads(res.text)['data']['resp_data'][0]['predictresult'])
-    return [json.loads(res.text)['data']['resp_data'][0]['predictresult']]
+    """
+    使用SVM算法预测下一个COD
+    :return: [COD预测值]
+    """
+    with app.app_context():
+        data = query2dict(WaterData.query.all())
+        cods = []
+        for dic in data[-3:]:
+            cods.append(dic['COD'])
+        url = Edge_URL + SVR_port
+        Body = {
+            # "history": [428.847, 422.564, 416.514]
+            "history": cods
+        }
+        # res = requests.post(url=url, headers=Headers, json=Body)
+        requests.packages.urllib3.disable_warnings()
+        res = requests.post(url=url, json=Body, verify=False)
+        # print(json.loads(res.text)['data']['resp_data'][0]['predictresult'])
+        return [json.loads(res.text)['data']['resp_data'][0]['predictresult']]
 
 
 @app.route('/ctrl_motor<num>/<speed>')
@@ -534,6 +624,26 @@ def queryState():
     :return: 状态dict
     """
     return {'switch': ctrlSystem.switch, 'motor': ctrlSystem.motor}
+
+
+@app.route('/AllControl', methods=['POST'])
+@cross_origin()
+def control_all():
+    url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot/35bacf8d0d634b3f8a70fc9b5286d79d/devices/63dcdaa2352830580e47364e_2023_3_25/commands"
+    Headers = {
+        "X-Auth-Token": token_jxy,
+        'Content-Type': 'application/json'}
+    Body = {
+        "service_id": "All_Control_System",
+        "command_name": f"All_Control",
+        "paras": {
+            "Control_Flags": "20230810190159000000TTTTTTTTT777777"
+        }
+    }
+    print(request.get_json())
+    command = requests.post(url=url, json=Body, headers=Headers)
+    res = command.status_code
+    return str(res)
 
 
 if __name__ == '__main__':
