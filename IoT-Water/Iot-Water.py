@@ -66,11 +66,11 @@ class ctrl_system:
     def start_auto(self):
         self.autoCtrl_flag = True
         Async_autoCtrl().auto_ctrl_thread()  # 启动自动控制线程
-        print('Start auto-control.')
+        print('Start auto control.')
 
     def stop_auto(self):
         self.autoCtrl_flag = False
-        print('Stop auto-control.')
+        print('Stop auto control.')
 
 
 ctrlSystem = ctrl_system()
@@ -208,6 +208,7 @@ class Async_autoCtrl:
     def auto_ctrl_thread(*args):
         cod_valid = pd.read_csv('COD_valid.csv', index_col=False)
         DO_set = 2.5
+        global virtual_DO
         while ctrlSystem.autoCtrl_flag:
             with app.app_context():
                 data = query2dict(WaterData.query.all())
@@ -298,7 +299,6 @@ class Async_autoCtrl:
                     }
                 }
                 command = requests.post(url=url, json=Body, headers=Headers)
-                global virtual_DO
                 virtual_DO = virtual_DO + (ctrl_index-10)*0.05
                 print(ctrl_index)
                 time.sleep(5)
@@ -644,7 +644,7 @@ def queryState():
 
 @app.route('/AllControl', methods=['POST'])
 @cross_origin()
-def control_switch():
+def control_all():
     """
     统一控制格式
     :return: 状态码
