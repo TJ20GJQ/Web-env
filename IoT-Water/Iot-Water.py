@@ -60,6 +60,9 @@ class ctrl_system:
         self.pump[id] = state
         print(f'Pump{id}: {state}')
 
+    def frame_ctrl(self, frame):
+        pass
+
     def start_auto(self):
         self.autoCtrl_flag = True
         Async_autoCtrl().auto_ctrl_thread()  # 启动自动控制线程
@@ -216,7 +219,8 @@ class Async_autoCtrl:
                     "history": cods
                 }
                 requests.packages.urllib3.disable_warnings()
-                res = requests.post(url=Edge_URL + LSTM_port, json=Body, verify=False)
+                res = requests.post(url=Edge_URL + LSTM_port,
+                                    json=Body, verify=False)
                 lstm_res = json.loads(res.text)[0]['predict']
                 # print(lstm_res)
                 # SVR
@@ -226,23 +230,29 @@ class Async_autoCtrl:
                 Body = {
                     "history": cods
                 }
-                res = requests.post(url=Edge_URL + SVR_port, json=Body, verify=False)
-                svr_res = json.loads(res.text)['data']['resp_data'][0]['predictresult']
+                res = requests.post(url=Edge_URL + SVR_port,
+                                    json=Body, verify=False)
+                svr_res = json.loads(res.text)[
+                    'data']['resp_data'][0]['predictresult']
                 # print(svr_res)
                 # 专家系统
                 hours_weight = [[0.98252977], [1.], [0.94414396], [0.80917324], [0.36559509], [0.18254638],
-                                [0.05554637], [0.], [0.06089251], [0.14743402], [0.37075089], [0.49937936],
-                                [0.50749575], [0.58988084], [0.63060292], [0.79432664], [0.87635415], [0.81332173],
+                                [0.05554637], [0.], [0.06089251], [
+                                    0.14743402], [0.37075089], [0.49937936],
+                                [0.50749575], [0.58988084], [0.63060292], [
+                                    0.79432664], [0.87635415], [0.81332173],
                                 [0.66796073], [0.62331583], [0.65741986], [0.72028482], [0.71353762], [0.75597631]]
-                weekdays_weight = [[0.83437227], [0.6625369], [0.52733128], [0.6964075], [1.], [0.], [0.11924007]]
+                weekdays_weight = [[0.83437227], [0.6625369], [
+                    0.52733128], [0.6964075], [1.], [0.], [0.11924007]]
                 pred = -0.317249 + 0.005082 * lstm_res + 0.995783 * svr_res + \
-                       0.672760 * hours_weight[cod_valid['hour'][valid_data_num]][0] - 0.265673 * \
-                       weekdays_weight[cod_valid['week'][valid_data_num]][0]
+                    0.672760 * hours_weight[cod_valid['hour'][valid_data_num]][0] - 0.265673 * \
+                    weekdays_weight[cod_valid['week'][valid_data_num]][0]
                 print(pred)
                 # 预测残差
                 ctrl = pred - data[-1]['COD']
 
-                ctrl_rule = [-60, -54, -48, -42, -36, -30, -24, -18, -12, -6, 0, 6, 12, 18, 24, 30, 36, 42, 48, 54, 60]
+                ctrl_rule = [-60, -54, -48, -42, -36, -30, -24, -
+                             18, -12, -6, 0, 6, 12, 18, 24, 30, 36, 42, 48, 54, 60]
                 ctrl_index = -1
                 for i in range(len(ctrl_rule)):
                     if ctrl < ctrl_rule[i]:
@@ -632,7 +642,7 @@ def queryState():
     return {'switch': ctrlSystem.switch, 'motor': ctrlSystem.motor}
 
 
-@app.route('/AllControl',methods=['POST'])
+@app.route('/AllControl', methods=['POST'])
 @cross_origin()
 def control_switch():
     """
