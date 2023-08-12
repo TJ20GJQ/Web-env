@@ -174,10 +174,13 @@ class Async_getData:
                     db.session.add(add)
                     db.session.commit()
                 except KeyError:  # 如果数据获取有误
-                    add = WaterData(datetime=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), temperature=100.0,
-                                    PH=5.9, ORP=2.5, TDS=0.56, TU=2946, DO=virtual_DO, COD=cod_valid[valid_data_num])
-                    db.session.add(add)
-                    db.session.commit()
+                    # add = WaterData(datetime=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), temperature=100.0,
+                    #                 PH=5.9, ORP=2.5, TDS=0.56, TU=2946, DO=virtual_DO, COD=cod_valid[valid_data_num])
+                    # db.session.add(add)
+                    # db.session.commit()
+                    pass
+                except IndexError:
+                    valid_data_num = 0  # 数据超过2000多，cod数据不够，从头开始
                     pass
             time.sleep(1)
             valid_data_num = valid_data_num + 1
@@ -201,6 +204,7 @@ class Async_autoCtrl:
     @start_async
     def auto_ctrl_thread(*args):
         cod_valid = pd.read_csv('COD_valid.csv', index_col=False)
+        DO_set = 2.5
         while ctrlSystem.autoCtrl_flag:
             with app.app_context():
                 data = query2dict(WaterData.query.all())
@@ -246,6 +250,8 @@ class Async_autoCtrl:
                         break
                 if ctrl_index == -1:
                     ctrl_index = len(ctrl_rule)
+                DO_set = DO_set + (ctrl_index-10)*0.02
+                ctrl_index2 = (DO_set - virtual_DO)*50+10
 
                 ctrl_commends = ['20230810190159000000FFFFFFFFF111111',
                                  '20230810190159000000FFFFFFFFF333333',
@@ -269,7 +275,7 @@ class Async_autoCtrl:
                                  '20230810190159000000TTFTTTTTT999999',
                                  '20230810190159000000TTTTTTTTT111111',
                                  ]
-                cmd = ctrl_commends[ctrl_index]
+                cmd = ctrl_commends[ctrl_index2]
                 url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot/35bacf8d0d634b3f8a70fc9b5286d79d/devices/63dcdaa2352830580e47364e_2023_3_25/commands"
                 Headers = {
                     "X-Auth-Token": token_jxy,
@@ -283,7 +289,7 @@ class Async_autoCtrl:
                 }
                 command = requests.post(url=url, json=Body, headers=Headers)
                 global virtual_DO
-                virtual_DO = virtual_DO + (ctrl_index-10)*0.01
+                virtual_DO = virtual_DO + (ctrl_index-10)*0.05
                 print(ctrl_index)
                 time.sleep(5)
 
@@ -626,9 +632,13 @@ def queryState():
     return {'switch': ctrlSystem.switch, 'motor': ctrlSystem.motor}
 
 
-@app.route('/AllControl', methods=['POST'])
+@app.route('/AllControl',methods=['POST'])
 @cross_origin()
-def control_all():
+def control_switch():
+    """
+    统一控制格式
+    :return: 状态码
+    """
     url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot/35bacf8d0d634b3f8a70fc9b5286d79d/devices/63dcdaa2352830580e47364e_2023_3_25/commands"
     Headers = {
         "X-Auth-Token": token_jxy,
@@ -637,10 +647,10 @@ def control_all():
         "service_id": "All_Control_System",
         "command_name": f"All_Control",
         "paras": {
-            "Control_Flags": "20230810190159000000TTTTTTTTT777777"
+            "Control_Flags": request.get_json()
         }
     }
-    print(request.get_json())
+    # print(request.get_data())  # 二进制字节流
     command = requests.post(url=url, json=Body, headers=Headers)
     res = command.status_code
     return str(res)
