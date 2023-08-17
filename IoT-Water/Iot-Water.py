@@ -245,7 +245,8 @@ class Async_getData:
                                     ORP=res['response']['services'][0]['properties']['ORP'] / 100,
                                     TDS=res['response']['services'][0]['properties']['TDS'],
                                     TU=res['response']['services'][0]['properties']['turbidity'],
-                                    DO=perceiveSystem.DO_virtual,
+                                    DO=res['response']['services'][0]['properties']['DO']/1000,
+                                    # DO=perceiveSystem.DO_virtual,
                                     COD=cod_valid[perceiveSystem.valid_data_num])
                     db.session.add(add)
                     db.session.commit()
