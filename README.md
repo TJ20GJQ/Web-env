@@ -21,3 +21,10 @@
 * 创建ctrl_system：同步控制系统状态，并设置自动控制
 * 添加 /ctrl_pump&lt;num>/&lt;state>：控制第num个蠕动泵的状态为state
 * 添加 /query_state：查询控制系统状态
+
+***2023-08-17***
+* 创建perceive_system，同步模拟COD和DO数据
+* 创建expert_system，专家系统，修改自动控制曝气规则
+* 添加 /control_all：统一控制指令数据格式，实现批量控制
+* 添加 /reset：一键重置控制系统状态
+* 启动自动控制多线程
