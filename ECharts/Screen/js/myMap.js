@@ -1,4 +1,4 @@
-(function() {
+(function () {
   // 1. 实例化对象
   var myChart = echarts.init(document.querySelector(".map .chart"));
   // 2. 指定配置和数据
@@ -145,7 +145,7 @@
   var planePath =
     "path://M1705.06,1318.313v-89.254l-319.9-221.799l0.073-208.063c0.521-84.662-26.629-121.796-63.961-121.491c-37.332-0.305-64.482,36.829-63.961,121.491l0.073,208.063l-319.9,221.799v89.254l330.343-157.288l12.238,241.308l-134.449,92.931l0.531,42.034l175.125-42.917l175.125,42.917l0.531-42.034l-134.449-92.931l12.238-241.308L1705.06,1318.313z";
   //var planePath = 'arrow';
-  var convertData = function(data) {
+  var convertData = function (data) {
     var res = [];
     for (var i = 0; i < data.length; i++) {
       var dataItem = data[i];
@@ -170,7 +170,7 @@
     ["西安", XAData],
     ["西宁", XNData],
     ["银川", YCData]
-  ].forEach(function(item, i) {
+  ].forEach(function (item, i) {
     series.push(
       {
         name: item[0] + " Top3",
@@ -230,7 +230,7 @@
             formatter: "{b}"
           }
         },
-        symbolSize: function(val) {
+        symbolSize: function (val) {
           return val[2] / 8;
         },
         itemStyle: {
@@ -241,7 +241,7 @@
             areaColor: "#2B91B7"
           }
         },
-        data: item[1].map(function(dataItem) {
+        data: item[1].map(function (dataItem) {
           return {
             name: dataItem[1].name,
             value: geoCoordMap[dataItem[1].name].concat([dataItem[1].value])
@@ -253,7 +253,7 @@
   var option = {
     tooltip: {
       trigger: "item",
-      formatter: function(params, ticket, callback) {
+      formatter: function (params, ticket, callback) {
         if (params.seriesType == "effectScatter") {
           return "线路：" + params.data.name + "" + params.data.value[2];
         } else if (params.seriesType == "lines") {
@@ -295,7 +295,7 @@
     series: series
   };
   myChart.setOption(option);
-  window.addEventListener("resize", function() {
+  window.addEventListener("resize", function () {
     myChart.resize();
   });
 })();

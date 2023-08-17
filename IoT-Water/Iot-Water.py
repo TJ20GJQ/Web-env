@@ -9,6 +9,7 @@ import json
 import random
 from flask import request
 import pandas as pd
+import numpy as np
 
 app = Flask(__name__, static_url_path='/s',
             static_folder='static', template_folder='templates')
@@ -32,9 +33,29 @@ SVR_port = '1031'
 
 # 连接华为云
 token_jxy = ""  # Token 调用IoTDA
-token_gjq = ""  # Token 调用ModelArts
+token_gjq = ""  # Token 调用ModelArts、IEF
 token_flag = False  # 已获取Token标识
-getData_flag = False  # 启动数据获取标识
+
+
+class perceive_system:
+    """
+    用于根据预测COD同步模拟感知系统属性DO
+    """
+
+    def __init__(self):
+        self.DO_set = 2.4
+        self.DO_virtual = 2.3
+        self.COD_virtual = 250
+        self.COD_predict = 276
+        self.getData_flag = False  # 启动数据获取标识
+        self.valid_data_num = 0  # 存入数据库的有效数据量
+
+    def start_get(self):
+        self.getData_flag = True
+        Async_getData().get_data_thread()  # 启动异步线程
+
+    def stop_get(self):
+        self.getData_flag = False
 
 
 class ctrl_system:
@@ -46,7 +67,10 @@ class ctrl_system:
         self.switch = ['OFF', 'OFF', 'OFF', 'OFF', 'OFF', 'OFF']
         self.motor = [0, 0, 0, 0, 0, 0]
         self.pump = ['OFF', 'OFF', 'OFF']
+        self.power = None
         self.autoCtrl_flag = False  # 启动自动控制标识
+        self.ctrlGet_flag = False  # 使用自动控制开启获取数据标识
+        self.auto_time = 0  # 自动运行多少个5s周期（以5s为周期控制智能模式）
 
     def ctrl_switch(self, id, state):
         self.switch[id] = state
@@ -61,19 +85,59 @@ class ctrl_system:
         print(f'Pump{id}: {state}')
 
     def frame_ctrl(self, frame):
-        pass
+        self.switch[0] = 'ON' if frame[20] == 'T' else 'OFF'
+        self.switch[1] = 'ON' if frame[21] == 'T' else 'OFF'
+        self.switch[2] = 'ON' if frame[22] == 'T' else 'OFF'
+        self.switch[3] = 'ON' if frame[23] == 'T' else 'OFF'
+        self.switch[4] = 'ON' if frame[24] == 'T' else 'OFF'
+        self.switch[5] = 'ON' if frame[25] == 'T' else 'OFF'
+        self.pump[0] = 'ON' if frame[26] == 'T' else 'OFF'
+        self.pump[1] = 'ON' if frame[27] == 'T' else 'OFF'
+        self.pump[2] = 'ON' if frame[28] == 'T' else 'OFF'
+        self.motor[0] = int(frame[29]) if frame[29] != 'A' else 10
+        self.motor[1] = int(frame[30]) if frame[30] != 'A' else 10
+        self.motor[2] = int(frame[31]) if frame[31] != 'A' else 10
+        self.motor[3] = int(frame[32]) if frame[32] != 'A' else 10
+        self.motor[4] = int(frame[33]) if frame[33] != 'A' else 10
+        self.motor[5] = int(frame[34]) if frame[34] != 'A' else 10
 
     def start_auto(self):
+        if not perceiveSystem.getData_flag:  # 如果没有手动启动获取数据，需要先启动获取数据
+            perceiveSystem.getData_flag = True
+            Async_getData().get_data_thread()  # 启动异步线程
+            self.ctrlGet_flag = True
         self.autoCtrl_flag = True
         Async_autoCtrl().auto_ctrl_thread()  # 启动自动控制线程
         print('Start auto control.')
 
     def stop_auto(self):
+        if self.ctrlGet_flag:  # 如果是自动控制开启的数据获取，则终止线程
+            perceiveSystem.getData_flag = False
+            self.ctrlGet_flag = False
         self.autoCtrl_flag = False
         print('Stop auto control.')
 
 
-ctrlSystem = ctrl_system()
+class expert_system:
+    """
+    专家系统，提供控制参考
+    """
+
+    def __init__(self):
+        self.cod_valid = pd.read_csv('COD_valid.csv', index_col=False)
+        self.hours_weight = [[0.98252977], [1.], [0.94414396], [0.80917324], [0.36559509], [0.18254638], [0.05554637],
+                             [0.], [0.06089251], [0.14743402], [0.37075089], [0.49937936], [0.50749575], [0.58988084],
+                             [0.63060292], [0.79432664], [0.87635415], [0.81332173], [0.66796073], [0.62331583],
+                             [0.65741986], [0.72028482], [0.71353762], [0.75597631]]  # 每日权重
+        self.weekdays_weight = [[0.83437227], [0.6625369], [0.52733128], [0.6964075], [1.], [0.], [0.11924007]]  # 每周权重
+        self.weights = [-0.474074, 0.005334, 0.995509, 0.672805, 0.030601]  # 四项参照最小二乘法权重
+        self.ctrl_rule1 = list(range(150, 526, 25))  # 16档曝气石大调
+        self.ctrl_rule2 = [-40, -20, -10, -4, -1, 0, 1, 4, 10, 20, 40]  # 11档曝气盘微调
+
+
+perceiveSystem = perceive_system()  # 创建感知系统
+ctrlSystem = ctrl_system()  # 创建控制系统
+expertSystem = expert_system()  # 创建专家系统
 
 
 class WaterData(db.Model):
@@ -91,10 +155,6 @@ class WaterData(db.Model):
     TU = db.Column(db.Float)
     DO = db.Column(db.Float)
     COD = db.Column(db.Float)
-
-
-virtual_DO = 2.5
-valid_data_num = 0  # 存入数据库的有效数据量
 
 
 def query2dict(model_list):
@@ -146,12 +206,20 @@ class Async_getData:
     @start_async
     def get_data_thread(*args):
         cod_valid = pd.read_csv('COD_valid.csv', index_col=False)['fit']
-        global valid_data_num  # 循环次数，用来存储实际污水厂COD数据
         with app.app_context():
             db.create_all()  # 在数据库中生成数据表
             db.session.commit()
-        global getData_flag
-        while token_flag and getData_flag:  # 已获取token且开启数据获取
+        if perceiveSystem.valid_data_num == 0:  # 每次启动先存入48个历史数据，便于复现
+            with app.app_context():
+                for i in range(48):
+                    add = WaterData(datetime=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                    temperature=0, PH=0, ORP=0, TDS=0, TU=0, DO=2,
+                                    COD=cod_valid[perceiveSystem.valid_data_num])
+                    db.session.add(add)
+                    db.session.commit()
+                    perceiveSystem.valid_data_num += 1
+
+        while token_flag and perceiveSystem.getData_flag:  # 已获取token且开启数据获取
             # print("Getting data...")
             url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot/35bacf8d0d634b3f8" \
                   r"a70fc9b5286d79d/devices/641e635340773741f9fc2714_L610_CN2023/properties?service_id=SpraySwitch"
@@ -163,7 +231,7 @@ class Async_getData:
             }
             response = requests.get(url=url, params=Params, headers=Headers)
             res = json.loads(response.text)
-            print(res)
+            # print(res)
             with app.app_context():
                 try:
                     add = WaterData(datetime=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -172,21 +240,24 @@ class Async_getData:
                                     ORP=res['response']['services'][0]['properties']['ORP'] / 100,
                                     TDS=res['response']['services'][0]['properties']['TDS'],
                                     TU=res['response']['services'][0]['properties']['turbidity'],
-                                    DO=virtual_DO,
-                                    COD=cod_valid[valid_data_num])
+                                    DO=perceiveSystem.DO_virtual,
+                                    COD=cod_valid[perceiveSystem.valid_data_num])
                     db.session.add(add)
                     db.session.commit()
                 except KeyError:  # 如果数据获取有误
-                    # add = WaterData(datetime=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), temperature=100.0,
-                    #                 PH=5.9, ORP=2.5, TDS=0.56, TU=2946, DO=virtual_DO, COD=cod_valid[valid_data_num])
-                    # db.session.add(add)
-                    # db.session.commit()
+                    # 演示之前注释掉！！！！！！！！
+                    add = WaterData(datetime=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), temperature=100.0,
+                                    PH=5.9, ORP=2.5, TDS=0.56, TU=2946, DO=perceiveSystem.DO_virtual,
+                                    COD=cod_valid[perceiveSystem.valid_data_num])
+                    db.session.add(add)
+                    db.session.commit()
                     pass
                 except IndexError:
-                    valid_data_num = 0  # 数据超过2000多，cod数据不够，从头开始
+                    perceiveSystem.valid_data_num = 0  # 数据超过10000多，cod数据不够，从头开始
                     pass
             time.sleep(1)
-            valid_data_num = valid_data_num + 1
+            perceiveSystem.valid_data_num += 1
+            # print(perceiveSystem.valid_data_num)
 
 
 class Async_autoCtrl:
@@ -206,88 +277,104 @@ class Async_autoCtrl:
 
     @start_async
     def auto_ctrl_thread(*args):
-        cod_valid = pd.read_csv('COD_valid.csv', index_col=False)
-        DO_set = 2.5
-        global virtual_DO
         while ctrlSystem.autoCtrl_flag:
             with app.app_context():
                 data = query2dict(WaterData.query.all())
-                # LSTM
+                perceiveSystem.COD_virtual = data[-5]['COD']
+                # LSTM预测
                 cods = []
-                for dic in data[-48:]:
-                    cods.append(dic['COD'])
+                for i in range(-48, 0):
+                    cods.append(data[i * 5]['COD'])
                 Body = {
                     "history": cods
                 }
                 requests.packages.urllib3.disable_warnings()
-                res = requests.post(url=Edge_URL + LSTM_port,
-                                    json=Body, verify=False)
+                res = requests.post(url=Edge_URL + LSTM_port, json=Body, verify=False)
                 lstm_res = json.loads(res.text)[0]['predict']
                 # print(lstm_res)
-                # SVR
+                # SVR预测
                 cods = []
-                for dic in data[-3:]:
-                    cods.append(dic['COD'])
+                for i in range(-3, 0):
+                    cods.append(data[i * 5]['COD'])
+                print(cods)
                 Body = {
                     "history": cods
                 }
-                res = requests.post(url=Edge_URL + SVR_port,
-                                    json=Body, verify=False)
-                svr_res = json.loads(res.text)[
-                    'data']['resp_data'][0]['predictresult']
+                res = requests.post(url=Edge_URL+SVR_port, json=Body, verify=False)
+                svr_res = json.loads(res.text)['data']['resp_data'][0]['predictresult']
                 # print(svr_res)
-                # 专家系统
-                hours_weight = [[0.98252977], [1.], [0.94414396], [0.80917324], [0.36559509], [0.18254638],
-                                [0.05554637], [0.], [0.06089251], [
-                                    0.14743402], [0.37075089], [0.49937936],
-                                [0.50749575], [0.58988084], [0.63060292], [
-                                    0.79432664], [0.87635415], [0.81332173],
-                                [0.66796073], [0.62331583], [0.65741986], [0.72028482], [0.71353762], [0.75597631]]
-                weekdays_weight = [[0.83437227], [0.6625369], [
-                    0.52733128], [0.6964075], [1.], [0.], [0.11924007]]
-                pred = -0.317249 + 0.005082 * lstm_res + 0.995783 * svr_res + \
-                    0.672760 * hours_weight[cod_valid['hour'][valid_data_num]][0] - 0.265673 * \
-                    weekdays_weight[cod_valid['week'][valid_data_num]][0]
-                print(pred)
-                # 预测残差
-                ctrl = pred - data[-1]['COD']
-
-                ctrl_rule = [-60, -54, -48, -42, -36, -30, -24, -
-                             18, -12, -6, 0, 6, 12, 18, 24, 30, 36, 42, 48, 54, 60]
-                ctrl_index = -1
-                for i in range(len(ctrl_rule)):
-                    if ctrl < ctrl_rule[i]:
-                        ctrl_index = i
+                # 结合专家系统
+                perceiveSystem.COD_predict = sum(np.multiply(np.array(expertSystem.weights), np.array([1, lstm_res, svr_res,
+                                             expertSystem.hours_weight[expertSystem.cod_valid['hour'][perceiveSystem.valid_data_num]][0],
+                                             expertSystem.weekdays_weight[expertSystem.cod_valid['week'][perceiveSystem.valid_data_num]][0]])))
+                print(perceiveSystem.COD_predict)
+                # 预测残差进行控制
+                ctrl = perceiveSystem.COD_predict - perceiveSystem.COD_virtual
+                ctrl_index1 = len(expertSystem.ctrl_rule1)
+                for i in range(ctrl_index1):
+                    if perceiveSystem.COD_predict < expertSystem.ctrl_rule1[i]:
+                        ctrl_index1 = i
                         break
-                if ctrl_index == -1:
-                    ctrl_index = len(ctrl_rule)
-                DO_set = DO_set + (ctrl_index-10)*0.02
-                ctrl_index2 = (DO_set - virtual_DO)*50+10
 
-                ctrl_commends = ['20230810190159000000FFFFFFFFF111111',
-                                 '20230810190159000000FFFFFFFFF333333',
-                                 '20230810190159000000FFFFFFFFF555555',
-                                 '20230810190159000000FFFFFFFFF777777',
-                                 '20230810190159000000FFFFFFFFF999999',
-                                 '20230810190159000000FFFFFTFFF111111',
-                                 '20230810190159000000FFFFFTFFF333333',
-                                 '20230810190159000000FFFFFTFFF555555',
-                                 '20230810190159000000FFFFFTFFF777777',
-                                 '20230810190159000000FFFFFTFFF999999',
-                                 '20230810190159000000FFFTFTTFT111111',
-                                 '20230810190159000000TTFTFTTTT333333',
-                                 '20230810190159000000TTFTFTTTT555555',
-                                 '20230810190159000000TTFTFTTTT777777',
-                                 '20230810190159000000TTFTFTTTT999999',
-                                 '20230810190159000000TTFTTTTTT111111',
-                                 '20230810190159000000TTFTTTTTT333333',
-                                 '20230810190159000000TTFTTTTTT555555',
-                                 '20230810190159000000TTFTTTTTT777777',
-                                 '20230810190159000000TTFTTTTTT999999',
-                                 '20230810190159000000TTTTTTTTT111111',
-                                 ]
-                cmd = ctrl_commends[ctrl_index2]
-                url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot/35bacf8d0d634b3f8a70fc9b5286d79d/devices/63dcdaa2352830580e47364e_2023_3_25/commands"
+                ctrl_index2 = len(expertSystem.ctrl_rule2)
+                for i in range(ctrl_index2):
+                    if ctrl < expertSystem.ctrl_rule2[i]:
+                        ctrl_index2 = i
+                        break
+
+                print(perceiveSystem.DO_set, perceiveSystem.DO_virtual)
+                perceiveSystem.DO_set = 2 + 0.05 * ctrl_index1
+                print(ctrl_index1, ctrl_index2)
+                ctrl_index2 = min(max(ctrl_index2 + round((perceiveSystem.DO_set - perceiveSystem.DO_virtual) * 40), 0),
+                                  10)  # DO反馈
+
+                # 桨叶定时开关，开5s 关10s
+                if ctrlSystem.switch[0] == 'OFF' and ctrlSystem.switch[1] == 'OFF':
+                    if ctrlSystem.auto_time % 3 == 0:
+                        fan_commend = 'TT'
+                    else:
+                        fan_commend = 'FF'
+                elif ctrlSystem.switch[0] == 'ON' and ctrlSystem.switch[1] == 'ON':
+                    fan_commend = 'FF'
+
+                # 曝气石间歇曝气
+                switch_commends = ['FFFF', 'FFTF', 'FTFF', 'FFFT', 'TFFF',
+                                   'TTFF', 'TFFT', 'FTFT', 'FTTF', 'FFTT',
+                                   'TFTF', 'TTTF', 'FTTT', 'TFTT', 'TTFT',
+                                   'TTTT']
+                switch_commend = switch_commends[ctrl_index1]
+                if switch_commend.count('T') == 1:
+                    temp = list('FFFF')
+                    temp[(switch_commend.index('T') + ctrlSystem.auto_time) % 4] = 'T'
+                    switch_commend = ''.join(temp)
+                elif switch_commend.count('T') == 2:
+                    if ctrlSystem.auto_time % 2 == 0:
+                        temp = list(switch_commend)
+                        for i in range(len(temp)):
+                            temp[i] = 'T' if temp[i] == 'F' else 'F'
+                        switch_commend = ''.join(temp)
+                elif switch_commend.count('T') == 3:
+                    temp = list('TTTT')
+                    temp[(switch_commend.index('F') + ctrlSystem.auto_time) % 4] = 'F'
+                    switch_commend = ''.join(temp)
+                else:
+                    pass
+
+                # 回流泵根据COD常开
+                pump_commends = ['FTF', 'FTF', 'FTF', 'FTF', 'FTF',
+                                 'TFT', 'TFT', 'TFT', 'TFT', 'TFT',
+                                 'TTT', 'TTT', 'TTT', 'TTT', 'TTT', 'TTT']
+                pump_commend = pump_commends[ctrl_index1]
+                large_commend = fan_commend + switch_commend + pump_commend  # 大调
+
+                # 曝气盘精确曝气
+                little_commends = ['000000', '111111', '222222', '333333', '444444',
+                                   '555555', '666666', '777777', '888888', '999999', 'AAAAAA']
+                little_commend = little_commends[ctrl_index2]  # 微调
+                ctrl_commends = '20230810190159000000' + large_commend + little_commend
+
+                url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot" \
+                      r"/35bacf8d0d634b3f8a70fc9b5286d79d/devices/63dcdaa2352830580e47364e_2023_3_25/commands"
                 Headers = {
                     "X-Auth-Token": token_jxy,
                     'Content-Type': 'application/json'}
@@ -295,12 +382,19 @@ class Async_autoCtrl:
                     "service_id": "All_Control_System",
                     "command_name": f"All_Control",
                     "paras": {
-                        "Control_Flags": cmd
+                        "Control_Flags": ctrl_commends
                     }
                 }
                 command = requests.post(url=url, json=Body, headers=Headers)
-                virtual_DO = virtual_DO + (ctrl_index-10)*0.05
-                print(ctrl_index)
+                # if command.status_code == 200:
+                perceiveSystem.DO_virtual = max(min(perceiveSystem.DO_virtual + (ctrl_index1 - 8) * 0.02 +
+                                                    0.005 * (ctrl_index2 - 5) + 0.001 * random.randint(-10, 10), 3), 2)
+                print(perceiveSystem.DO_set, perceiveSystem.DO_virtual)
+                print(ctrl_commends)
+                print('***********************')
+                ctrlSystem.auto_time += 1  # 自动控制次数+1
+                ctrlSystem.frame_ctrl(ctrl_commends)
+                ctrlSystem.power = ctrl_index1 * 0.5 + 0.1 * ctrl_index2
                 time.sleep(5)
 
 
@@ -311,59 +405,40 @@ def start():
     根目录，获取token，每次必须先启动以更新token
     :return: Get Token OK / Get Token Failed
     """
-    url = r"https://iam.cn-north-4.myhuaweicloud.com/v3/auth/tokens"
-    Headers = {
-        "Content-Type": "application/json"
-    }
-    Body_jxy = {
-        "auth": {
-            "identity": {
-                "methods": [
-                    "password"
-                ],
-                "password": {
-                    "user": {
-                        "name": "jx1",
-                        "password": "mayuguojia4",
-                        "domain": {
-                            "name": "hw091458930"
+
+    def get_token(user_name, user_password, domain_name, scope_name='cn-north-4'):
+        url = 'https://iam.' + scope_name + '.myhuaweicloud.com/v3/auth/tokens'
+        Headers = {
+            "Content-Type": "application/json"
+        }
+        Body = {
+            "auth": {
+                "identity": {
+                    "methods": [
+                        "password"
+                    ],
+                    "password": {
+                        "user": {
+                            "name": user_name,
+                            "password": user_password,
+                            "domain": {
+                                "name": domain_name
+                            }
                         }
                     }
-                }
-            },
-            "scope": {
-                "project": {
-                    "name": "cn-north-4"
+                },
+                "scope": {
+                    "project": {
+                        "name": scope_name
+                    }
                 }
             }
         }
-    }
-    Body_gjq = {
-        "auth": {
-            "identity": {
-                "methods": [
-                    "password"
-                ],
-                "password": {
-                    "user": {
-                        "name": "IoT-Water",
-                        "password": "GJQ1030ab",
-                        "domain": {
-                            "name": "jiaqiyun"
-                        }
-                    }
-                }
-            },
-            "scope": {
-                "project": {
-                    "name": "cn-north-4"
-                }
-            }
-        }
-    }
+        return requests.post(url=url, headers=Headers, json=Body)
+
     try:
-        response_jxy = requests.post(url=url, headers=Headers, json=Body_jxy)
-        response_gjq = requests.post(url=url, headers=Headers, json=Body_gjq)
+        response_jxy = get_token(user_name='jx1', user_password='mayuguojia4', domain_name='hw091458930')
+        response_gjq = get_token(user_name='IoT-Water', user_password='GJQ1030ab', domain_name='jiaqiyun')
         global token_jxy, token_gjq
         token_jxy = response_jxy.headers["X-Subject-Token"]
         token_gjq = response_gjq.headers["X-Subject-Token"]
@@ -381,9 +456,7 @@ def start_get_data():
     启动获取数据线程
     :return: Start get data and store into MySQL
     """
-    global getData_flag
-    getData_flag = True
-    Async_getData().get_data_thread()  # 启动异步线程
+    perceiveSystem.start_get()
     return 'Start get data and store into MySQL.'
 
 
@@ -394,8 +467,7 @@ def stop_get_data():
     关闭获取数据线程
     :return: Stop get data and store into MySQL
     """
-    global getData_flag
-    getData_flag = False
+    perceiveSystem.stop_get()
     return 'Stop get data and store into MySQL.'
 
 
@@ -514,8 +586,8 @@ def predict_data_svm():
             cods.append(dic['COD'])
         url = Edge_URL + SVR_port
         Body = {
-            # "history": [428.847, 422.564, 416.514]
-            "history": cods
+            "history": [420.116, 425.049, 418.906]
+            # "history": cods
         }
         # res = requests.post(url=url, headers=Headers, json=Body)
         requests.packages.urllib3.disable_warnings()
@@ -636,10 +708,12 @@ def stopAutoCtrl():
 @cross_origin()
 def queryState():
     """
-    查询控制系统状态
+    查询系统状态
     :return: 状态dict
     """
-    return {'switch': ctrlSystem.switch, 'motor': ctrlSystem.motor}
+    return {'switch': ctrlSystem.switch, 'motor': ctrlSystem.motor, 'pump': ctrlSystem.pump,
+            'COD': perceiveSystem.COD_virtual, 'COD_pre': perceiveSystem.COD_predict,
+            'DO': perceiveSystem.DO_virtual, 'power': ctrlSystem.power}
 
 
 @app.route('/AllControl', methods=['POST'])
@@ -663,6 +737,36 @@ def control_all():
     # print(request.get_data())  # 二进制字节流
     command = requests.post(url=url, json=Body, headers=Headers)
     res = command.status_code
+    if res == 200:
+        ctrlSystem.frame_ctrl(request.get_json())
+    return str(res)
+
+
+@app.route('/reset')
+@cross_origin()
+def reset_ctrl():
+    """
+    重置控制系统
+    :return: 状态码
+    """
+    url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot/35bacf8d0d634b3f8a70fc9b5286d79d/devices/63dcdaa2352830580e47364e_2023_3_25/commands"
+    Headers = {
+        "X-Auth-Token": token_jxy,
+        'Content-Type': 'application/json'}
+    Body = {
+        "service_id": "All_Control_System",
+        "command_name": f"All_Control",
+        "paras": {
+            "Control_Flags": "00000000000000000000FFFFFFFFF000000"
+        }
+    }
+    # print(request.get_data())  # 二进制字节流
+    command = requests.post(url=url, json=Body, headers=Headers)
+    res = command.status_code
+    # print(res)
+    if res == 200:
+        ctrlSystem.frame_ctrl("00000000000000000000FFFFFFFFF000000")
+        ctrlSystem.stop_auto()
     return str(res)
 
 
