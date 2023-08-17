@@ -126,13 +126,18 @@ class expert_system:
     def __init__(self):
         self.cod_valid = pd.read_csv('COD_valid.csv', index_col=False)
         self.hours_weight = [[0.98252977], [1.], [0.94414396], [0.80917324], [0.36559509], [0.18254638], [0.05554637],
-                             [0.], [0.06089251], [0.14743402], [0.37075089], [0.49937936], [0.50749575], [0.58988084],
-                             [0.63060292], [0.79432664], [0.87635415], [0.81332173], [0.66796073], [0.62331583],
+                             [0.], [0.06089251], [0.14743402], [0.37075089], [
+                                 0.49937936], [0.50749575], [0.58988084],
+                             [0.63060292], [0.79432664], [0.87635415], [
+                                 0.81332173], [0.66796073], [0.62331583],
                              [0.65741986], [0.72028482], [0.71353762], [0.75597631]]  # 每日权重
-        self.weekdays_weight = [[0.83437227], [0.6625369], [0.52733128], [0.6964075], [1.], [0.], [0.11924007]]  # 每周权重
-        self.weights = [-0.474074, 0.005334, 0.995509, 0.672805, 0.030601]  # 四项参照最小二乘法权重
+        self.weekdays_weight = [[0.83437227], [0.6625369], [
+            0.52733128], [0.6964075], [1.], [0.], [0.11924007]]  # 每周权重
+        self.weights = [-0.474074, 0.005334, 0.995509,
+                        0.672805, 0.030601]  # 四项参照最小二乘法权重
         self.ctrl_rule1 = list(range(150, 526, 25))  # 16档曝气石大调
-        self.ctrl_rule2 = [-40, -20, -10, -4, -1, 0, 1, 4, 10, 20, 40]  # 11档曝气盘微调
+        self.ctrl_rule2 = [-40, -20, -10, -4, -
+                           1, 0, 1, 4, 10, 20, 40]  # 11档曝气盘微调
 
 
 perceiveSystem = perceive_system()  # 创建感知系统
@@ -289,7 +294,8 @@ class Async_autoCtrl:
                     "history": cods
                 }
                 requests.packages.urllib3.disable_warnings()
-                res = requests.post(url=Edge_URL + LSTM_port, json=Body, verify=False)
+                res = requests.post(url=Edge_URL + LSTM_port,
+                                    json=Body, verify=False)
                 lstm_res = json.loads(res.text)[0]['predict']
                 # print(lstm_res)
                 # SVR预测
@@ -300,13 +306,16 @@ class Async_autoCtrl:
                 Body = {
                     "history": cods
                 }
-                res = requests.post(url=Edge_URL+SVR_port, json=Body, verify=False)
-                svr_res = json.loads(res.text)['data']['resp_data'][0]['predictresult']
+                res = requests.post(url=Edge_URL+SVR_port,
+                                    json=Body, verify=False)
+                svr_res = json.loads(res.text)[
+                    'data']['resp_data'][0]['predictresult']
                 # print(svr_res)
                 # 结合专家系统
                 perceiveSystem.COD_predict = sum(np.multiply(np.array(expertSystem.weights), np.array([1, lstm_res, svr_res,
-                                             expertSystem.hours_weight[expertSystem.cod_valid['hour'][perceiveSystem.valid_data_num]][0],
-                                             expertSystem.weekdays_weight[expertSystem.cod_valid['week'][perceiveSystem.valid_data_num]][0]])))
+                                                                                                       expertSystem.hours_weight[expertSystem.cod_valid[
+                                                                                                           'hour'][perceiveSystem.valid_data_num]][0],
+                                                                                                       expertSystem.weekdays_weight[expertSystem.cod_valid['week'][perceiveSystem.valid_data_num]][0]])))
                 print(perceiveSystem.COD_predict)
                 # 预测残差进行控制
                 ctrl = perceiveSystem.COD_predict - perceiveSystem.COD_virtual
@@ -345,7 +354,8 @@ class Async_autoCtrl:
                 switch_commend = switch_commends[ctrl_index1]
                 if switch_commend.count('T') == 1:
                     temp = list('FFFF')
-                    temp[(switch_commend.index('T') + ctrlSystem.auto_time) % 4] = 'T'
+                    temp[(switch_commend.index('T') +
+                          ctrlSystem.auto_time) % 4] = 'T'
                     switch_commend = ''.join(temp)
                 elif switch_commend.count('T') == 2:
                     if ctrlSystem.auto_time % 2 == 0:
@@ -355,7 +365,8 @@ class Async_autoCtrl:
                         switch_commend = ''.join(temp)
                 elif switch_commend.count('T') == 3:
                     temp = list('TTTT')
-                    temp[(switch_commend.index('F') + ctrlSystem.auto_time) % 4] = 'F'
+                    temp[(switch_commend.index('F') +
+                          ctrlSystem.auto_time) % 4] = 'F'
                     switch_commend = ''.join(temp)
                 else:
                     pass
@@ -437,8 +448,10 @@ def start():
         return requests.post(url=url, headers=Headers, json=Body)
 
     try:
-        response_jxy = get_token(user_name='jx1', user_password='mayuguojia4', domain_name='hw091458930')
-        response_gjq = get_token(user_name='IoT-Water', user_password='GJQ1030ab', domain_name='jiaqiyun')
+        response_jxy = get_token(
+            user_name='jx1', user_password='mayuguojia4', domain_name='hw091458930')
+        response_gjq = get_token(
+            user_name='IoT-Water', user_password='GJQ1030ab', domain_name='jiaqiyun')
         global token_jxy, token_gjq
         token_jxy = response_jxy.headers["X-Subject-Token"]
         token_gjq = response_gjq.headers["X-Subject-Token"]
