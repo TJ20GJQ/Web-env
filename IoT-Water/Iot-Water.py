@@ -20,11 +20,28 @@ PORT = 3306  # MySQL监听的端口号，默认3306
 USERNAME = "root"  # 连接MySQL的用户名，自己设置
 PASSWORD = "GJQ123"  # 连接MySQL的密码，自己设置
 DATABASE = "WaterData"  # MySQL上创建的数据库名称
-# 通过修改以下代码来操作不同的SQL比写原生SQL简单很多 --> 通过ORM可以实现从底层更改使用的SQL
 app.config[
     'SQLALCHEMY_DATABASE_URI'] = f"mysql+pymysql://{USERNAME}:{PASSWORD}@{HOSTNAME}:{PORT}/{DATABASE}?charset=utf8mb4"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = True
 db = SQLAlchemy(app)
+
+
+class WaterData(db.Model):
+    """
+    定义存储数据表table WaterData及其column
+    """
+    __tablename__ = "waterData"
+
+    id = db.Column("id", db.Integer, primary_key=True, autoincrement=True)
+    datetime = db.Column(db.DateTime)
+    temperature = db.Column(db.Float)
+    ORP = db.Column(db.Float)
+    PH = db.Column(db.Float)
+    TDS = db.Column(db.Float)
+    TU = db.Column(db.Float)
+    DO = db.Column(db.Float)
+    COD = db.Column(db.Float)
+
 
 # 连接边缘节点
 Edge_URL = "https://192.168.203.131:"
@@ -49,6 +66,8 @@ class perceive_system:
         self.COD_predict = 276
         self.getData_flag = False  # 启动数据获取标识
         self.valid_data_num = 0  # 存入数据库的有效数据量
+        self.device_status = [0, 0, 0, 0, 0, 0]  # 六个传感器状态，0为正常，1为故障，2为精准度下降
+        self.sensor_state = []
 
     def start_get(self):
         self.getData_flag = True
@@ -56,6 +75,44 @@ class perceive_system:
 
     def stop_get(self):
         self.getData_flag = False
+
+    def self_test(self):
+        def var(data_list):
+            temp = np.array(data_list)
+            return np.var(temp)
+
+        def mean(data_list):
+            temp = np.array(data_list)
+            return np.mean(temp)
+
+        with app.app_context():
+            data = query2dict(WaterData.query.all())[-10:]
+            bufferT = [d['temperature'] for d in data]
+            bufferORP = [d['ORP'] for d in data]
+            bufferPH = [d['PH'] for d in data]
+            bufferTDS = [d['TDS'] for d in data]
+            bufferTU = [d['TU'] for d in data]
+            bufferDO = [d['DO'] for d in data]
+            bufferCOD = [d['COD'] for d in data]
+            self.sensor_state = []
+            if var(bufferT) > 4:
+                self.sensor_state.append('温度变化异常')
+            if var(bufferORP) > 100:
+                self.sensor_state.append('缺氧区DO异常')
+            if var(bufferPH) > 2:
+                self.sensor_state.append('PH变化异常')
+            if mean(bufferPH) < 5:
+                self.sensor_state.append('PH过低')
+            if mean(bufferPH) > 10:
+                self.sensor_state.append('PH过高')
+            if var(bufferTDS) > 100:
+                self.sensor_state.append('TDS变化异常')
+            if mean(bufferDO) < 1.5:
+                self.sensor_state.append('好氧区DO过低')
+            if mean(bufferDO) > 3.5:
+                self.sensor_state.append('好氧区DO过高')
+            if mean(bufferCOD) > 500:
+                self.sensor_state.append('进口COD过高')
 
 
 class ctrl_system:
@@ -67,7 +124,7 @@ class ctrl_system:
         self.switch = ['OFF', 'OFF', 'OFF', 'OFF', 'OFF', 'OFF']
         self.motor = [0, 0, 0, 0, 0, 0]
         self.pump = ['OFF', 'OFF', 'OFF']
-        self.power = None
+        self.power = 0
         self.autoCtrl_flag = False  # 启动自动控制标识
         self.ctrlGet_flag = False  # 使用自动控制开启获取数据标识
         self.auto_time = 0  # 自动运行多少个5s周期（以5s为周期控制智能模式）
@@ -117,6 +174,16 @@ class ctrl_system:
         self.autoCtrl_flag = False
         print('Stop auto control.')
 
+    def cal_power(self):
+        power_fan = 3*self.switch[:2].count('ON')
+        power_pump = 7*self.pump.count('ON')
+        power_stone = 11.08*self.switch[2:].count('ON')
+        power_pan = 0
+        for i in self.motor:
+            power_pan += [0, 4.9, 5, 5.2, 5.5, 6, 6.6, 7.3, 8.1, 9, 10][i]
+        print(power_pan,power_stone,power_pump,power_fan)
+        return power_fan+power_pump+power_stone+power_pan
+
 
 class expert_system:
     """
@@ -126,40 +193,18 @@ class expert_system:
     def __init__(self):
         self.cod_valid = pd.read_csv('COD_valid.csv', index_col=False)
         self.hours_weight = [[0.98252977], [1.], [0.94414396], [0.80917324], [0.36559509], [0.18254638], [0.05554637],
-                             [0.], [0.06089251], [0.14743402], [0.37075089], [
-                                 0.49937936], [0.50749575], [0.58988084],
-                             [0.63060292], [0.79432664], [0.87635415], [
-                                 0.81332173], [0.66796073], [0.62331583],
+                             [0.], [0.06089251], [0.14743402], [0.37075089], [0.49937936], [0.50749575], [0.58988084],
+                             [0.63060292], [0.79432664], [0.87635415], [0.81332173], [0.66796073], [0.62331583],
                              [0.65741986], [0.72028482], [0.71353762], [0.75597631]]  # 每日权重
-        self.weekdays_weight = [[0.83437227], [0.6625369], [
-            0.52733128], [0.6964075], [1.], [0.], [0.11924007]]  # 每周权重
-        self.weights = [-0.474074, 0.005334, 0.995509,
-                        0.672805, 0.030601]  # 四项参照最小二乘法权重
-        self.ctrl_rule1 = list(range(150, 526, 25))  # 16档曝气石大调
-        self.ctrl_rule2 = [-40, -20, -10, -4, -
-                           1, 0, 1, 4, 10, 20, 40]  # 11档曝气盘微调
+        self.weekdays_weight = [[0.83437227], [0.6625369], [0.52733128], [0.6964075], [1.], [0.], [0.11924007]]  # 每周权重
+        self.weights = [-0.474074, 0.005334, 0.995509, 0.672805, 0.030601]  # 四项参照最小二乘法权重
+        self.ctrl_rule1 = list(range(150, 450, 20))  # 16档曝气石大调
+        self.ctrl_rule2 = [-25, -16, -8, -4, 0, 4, 8, 16, 25]  # 9档曝气盘微调
 
 
 perceiveSystem = perceive_system()  # 创建感知系统
 ctrlSystem = ctrl_system()  # 创建控制系统
 expertSystem = expert_system()  # 创建专家系统
-
-
-class WaterData(db.Model):
-    """
-    定义存储数据表table WaterData及其column
-    """
-    __tablename__ = "waterData"
-
-    id = db.Column("id", db.Integer, primary_key=True, autoincrement=True)
-    datetime = db.Column(db.DateTime)
-    temperature = db.Column(db.Float)
-    ORP = db.Column(db.Float)
-    PH = db.Column(db.Float)
-    TDS = db.Column(db.Float)
-    TU = db.Column(db.Float)
-    DO = db.Column(db.Float)
-    COD = db.Column(db.Float)
 
 
 def query2dict(model_list):
@@ -245,18 +290,18 @@ class Async_getData:
                                     ORP=res['response']['services'][0]['properties']['ORP'] / 100,
                                     TDS=res['response']['services'][0]['properties']['TDS'],
                                     TU=res['response']['services'][0]['properties']['turbidity'],
-                                    DO=res['response']['services'][0]['properties']['DO']/1000,
+                                    DO=res['response']['services'][0]['properties']['DO'] / 1000,
                                     # DO=perceiveSystem.DO_virtual,
                                     COD=cod_valid[perceiveSystem.valid_data_num])
                     db.session.add(add)
                     db.session.commit()
-                except KeyError:  # 如果数据获取有误
+                except KeyError or TypeError:  # 如果数据获取有误
                     # 演示之前注释掉！！！！！！！！
-                    add = WaterData(datetime=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), temperature=100.0,
-                                    PH=5.9, ORP=2.5, TDS=0.56, TU=2946, DO=perceiveSystem.DO_virtual,
-                                    COD=cod_valid[perceiveSystem.valid_data_num])
-                    db.session.add(add)
-                    db.session.commit()
+                    # add = WaterData(datetime=datetime.now().strftime('%Y-%m-%d %H:%M:%S'), temperature=100.0,
+                    #                 PH=2, ORP=2.5, TDS=108, TU=2946, DO=2.5,
+                    #                 COD=cod_valid[perceiveSystem.valid_data_num])
+                    # db.session.add(add)
+                    # db.session.commit()
                     pass
                 except IndexError:
                     perceiveSystem.valid_data_num = 0  # 数据超过10000多，cod数据不够，从头开始
@@ -264,6 +309,8 @@ class Async_getData:
             time.sleep(1)
             perceiveSystem.valid_data_num += 1
             # print(perceiveSystem.valid_data_num)
+            if perceiveSystem.valid_data_num % 10 == 0:
+                perceiveSystem.self_test()
 
 
 class Async_autoCtrl:
@@ -307,16 +354,20 @@ class Async_autoCtrl:
                 Body = {
                     "history": cods
                 }
-                res = requests.post(url=Edge_URL+SVR_port,
+                res = requests.post(url=Edge_URL + SVR_port,
                                     json=Body, verify=False)
                 svr_res = json.loads(res.text)[
                     'data']['resp_data'][0]['predictresult']
                 # print(svr_res)
                 # 结合专家系统
-                perceiveSystem.COD_predict = sum(np.multiply(np.array(expertSystem.weights), np.array([1, lstm_res, svr_res,
-                                                                                                       expertSystem.hours_weight[expertSystem.cod_valid[
-                                                                                                           'hour'][perceiveSystem.valid_data_num]][0],
-                                                                                                       expertSystem.weekdays_weight[expertSystem.cod_valid['week'][perceiveSystem.valid_data_num]][0]])))
+                perceiveSystem.COD_predict = sum(
+                    np.multiply(np.array(expertSystem.weights), np.array([1, lstm_res, svr_res,
+                                                                          expertSystem.hours_weight[
+                                                                              expertSystem.cod_valid['hour'][
+                                                                                  perceiveSystem.valid_data_num]][0],
+                                                                          expertSystem.weekdays_weight[
+                                                                              expertSystem.cod_valid['week'][
+                                                                                  perceiveSystem.valid_data_num]][0]])))
                 print(perceiveSystem.COD_predict)
                 # 预测残差进行控制
                 ctrl = perceiveSystem.COD_predict - perceiveSystem.COD_virtual
@@ -335,17 +386,20 @@ class Async_autoCtrl:
                 print(perceiveSystem.DO_set, perceiveSystem.DO_virtual)
                 perceiveSystem.DO_set = 2 + 0.05 * ctrl_index1
                 print(ctrl_index1, ctrl_index2)
-                ctrl_index2 = min(max(ctrl_index2 + round((perceiveSystem.DO_set - perceiveSystem.DO_virtual) * 40), 0),
-                                  10)  # DO反馈
-
-                # 桨叶定时开关，开5s 关10s
+                ctrl_index2 = min(max(ctrl_index2 + round((perceiveSystem.DO_set - perceiveSystem.DO_virtual) * 100), 0),
+                                  8)  # DO反馈
+                print(ctrl_index1, ctrl_index2)
+                # 桨叶定时开关，开15s 关40s
                 if ctrlSystem.switch[0] == 'OFF' and ctrlSystem.switch[1] == 'OFF':
-                    if ctrlSystem.auto_time % 3 == 0:
+                    if ctrlSystem.auto_time % 11 == 0:
                         fan_commend = 'TT'
                     else:
                         fan_commend = 'FF'
                 elif ctrlSystem.switch[0] == 'ON' and ctrlSystem.switch[1] == 'ON':
-                    fan_commend = 'FF'
+                    if ctrlSystem.auto_time % 3 == 0:
+                        fan_commend = 'FF'
+                    else:
+                        fan_commend = 'TT'
 
                 # 曝气石间歇曝气
                 switch_commends = ['FFFF', 'FFTF', 'FTFF', 'FFFT', 'TFFF',
@@ -380,34 +434,35 @@ class Async_autoCtrl:
                 large_commend = fan_commend + switch_commend + pump_commend  # 大调
 
                 # 曝气盘精确曝气
-                little_commends = ['000000', '111111', '222222', '333333', '444444',
-                                   '555555', '666666', '777777', '888888', '999999', 'AAAAAA']
+                little_commends = ['223322', '334433', '445544', '556655', '667766', '778877', '889988', '99AA99', 'AAAAAA']
                 little_commend = little_commends[ctrl_index2]  # 微调
                 ctrl_commends = '20230810190159000000' + large_commend + little_commend
 
-                url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot" \
-                      r"/35bacf8d0d634b3f8a70fc9b5286d79d/devices/63dcdaa2352830580e47364e_2023_3_25/commands"
-                Headers = {
-                    "X-Auth-Token": token_jxy,
-                    'Content-Type': 'application/json'}
-                Body = {
-                    "service_id": "All_Control_System",
-                    "command_name": f"All_Control",
-                    "paras": {
-                        "Control_Flags": ctrl_commends
+                if ctrlSystem.autoCtrl_flag:  # 防止reset后多控制一次
+                    url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot" \
+                          r"/35bacf8d0d634b3f8a70fc9b5286d79d/devices/64e251bc40f7455f1aea606a_2023_8_21/commands"
+                    Headers = {
+                        "X-Auth-Token": token_jxy,
+                        'Content-Type': 'application/json'}
+                    Body = {
+                        "service_id": "All_Control_System",
+                        "command_name": f"All_Control",
+                        "paras": {
+                            "Control_Flags": ctrl_commends
+                        }
                     }
-                }
-                command = requests.post(url=url, json=Body, headers=Headers)
-                # if command.status_code == 200:
-                perceiveSystem.DO_virtual = max(min(perceiveSystem.DO_virtual + (ctrl_index1 - 8) * 0.02 +
-                                                    0.005 * (ctrl_index2 - 5) + 0.001 * random.randint(-10, 10), 3), 2)
-                print(perceiveSystem.DO_set, perceiveSystem.DO_virtual)
-                print(ctrl_commends)
-                print('***********************')
-                ctrlSystem.auto_time += 1  # 自动控制次数+1
-                ctrlSystem.frame_ctrl(ctrl_commends)
-                ctrlSystem.power = ctrl_index1 * 0.5 + 0.1 * ctrl_index2
-                time.sleep(5)
+                    command = requests.post(url=url, json=Body, headers=Headers)
+                    # if command.status_code == 200:
+                    perceiveSystem.DO_virtual = max(min(2 + ctrl_index1 * 0.05 + 0.01 * (ctrl_index2 - 4) +
+                                                    0.001 * random.randint(-10, 10), 3), 2)
+                    print(perceiveSystem.DO_set, perceiveSystem.DO_virtual)
+                    print(ctrl_commends, ctrlSystem.cal_power())
+                    print('***********************')
+                    ctrlSystem.auto_time += 1  # 自动控制次数+1
+                    ctrlSystem.frame_ctrl(ctrl_commends)
+                    # ctrlSystem.power = ctrl_index1 * 0.5 + 0.1 * ctrl_index2
+                    time.sleep(5)
+                    print(ctrlSystem.auto_time)
 
 
 @app.route('/')
@@ -677,7 +732,8 @@ def control_pump(num, state):
     :param state: 控制状态 ON/OFF
     :return: 响应码（200）
     """
-    url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot/35bacf8d0d634b3f8a70fc9b5286d79d/devices/63dcdaa2352830580e47364e_2023_3_25/commands"
+    url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot/35bacf8d0d634b3f8a70fc9b5286d79d" \
+          r"/devices/63dcdaa2352830580e47364e_2023_3_25/commands"
     Headers = {
         "X-Auth-Token": token_jxy,
         'Content-Type': 'application/json'
@@ -727,7 +783,7 @@ def queryState():
     """
     return {'switch': ctrlSystem.switch, 'motor': ctrlSystem.motor, 'pump': ctrlSystem.pump,
             'COD': perceiveSystem.COD_virtual, 'COD_pre': perceiveSystem.COD_predict,
-            'DO': perceiveSystem.DO_virtual, 'power': ctrlSystem.power}
+            'DO': perceiveSystem.DO_virtual, 'power': ctrlSystem.cal_power(), 'data_state': perceiveSystem.sensor_state}
 
 
 @app.route('/AllControl', methods=['POST'])
@@ -737,7 +793,8 @@ def control_all():
     统一控制格式
     :return: 状态码
     """
-    url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot/35bacf8d0d634b3f8a70fc9b5286d79d/devices/63dcdaa2352830580e47364e_2023_3_25/commands"
+    url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot/35bacf8d0d634b3f8a70fc9b5286d79d" \
+          r"/devices/64e251bc40f7455f1aea606a_2023_8_21/commands"
     Headers = {
         "X-Auth-Token": token_jxy,
         'Content-Type': 'application/json'}
@@ -751,7 +808,8 @@ def control_all():
     # print(request.get_data())  # 二进制字节流
     command = requests.post(url=url, json=Body, headers=Headers)
     res = command.status_code
-    if res == 200:
+    print(res)
+    if res == 400:
         ctrlSystem.frame_ctrl(request.get_json())
     return str(res)
 
@@ -763,7 +821,8 @@ def reset_ctrl():
     重置控制系统
     :return: 状态码
     """
-    url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot/35bacf8d0d634b3f8a70fc9b5286d79d/devices/63dcdaa2352830580e47364e_2023_3_25/commands"
+    url = r"https://59a6084cfa.st1.iotda-app.cn-north-4.myhuaweicloud.com:443/v5/iot/35bacf8d0d634b3f8a70fc9b5286d79d" \
+          r"/devices/64e251bc40f7455f1aea606a_2023_8_21/commands"
     Headers = {
         "X-Auth-Token": token_jxy,
         'Content-Type': 'application/json'}
@@ -779,8 +838,8 @@ def reset_ctrl():
     res = command.status_code
     # print(res)
     if res == 200:
-        ctrlSystem.frame_ctrl("00000000000000000000FFFFFFFFF000000")
         ctrlSystem.stop_auto()
+        ctrlSystem.frame_ctrl("00000000000000000000FFFFFFFFF000000")
     return str(res)
 
 
